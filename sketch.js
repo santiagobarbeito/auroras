@@ -42,10 +42,10 @@ const synthParams = {
   crossfadeTime: 1.2,
   minRest: 10.0,
   changeInterval: [6, 15],
-  amp: 0.5,
+  amp: 1,
   delayTime: 0.900,
-  delayFeedback: 0.2,
-  delayFilter: 3000,
+  delayFeedback: 0.25,
+  delayFilter: 4000,
   reverbTime: 2.98,
   reverbDecay: 0.4
 };
