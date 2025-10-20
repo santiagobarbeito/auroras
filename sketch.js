@@ -5,39 +5,59 @@
 // ==== PARÁMETROS VISUALES ====
 let PLANE_SIZE = 3000;
 let GRID_STEPS = 30;
-let DIST_BETWEEN = 180;
-let ALPHA_MIN = 8, ALPHA_MAX = 90, ALPHA_CURVE = 1.0;
+let DIST_BETWEEN = 380;
+let ALPHA_MIN = 8, ALPHA_MAX = 90, ALPHA_CURVE = 0.9;
 let WAVE_SPEED = 0.18, NOISE_SCALE = 0.0017, NOISE_OCTAVES = 4, NOISE_GAIN = 0.5, ANISO_FACTOR = 1.6;
-let WIND_DRIFT = 0.15, GUST_INTENS = 0.45, GUST_SPEED = 0.05;
-let TRANSLATION_SPEED = 0.2, TRANSLATION_RADIUS = 120;
+let WIND_DRIFT = 0.35, GUST_INTENS = 0.75, GUST_SPEED = 0.05;
+let TRANSLATION_SPEED = 0.0, TRANSLATION_RADIUS = 120;
 let PLANE_NORMAL, WIND_DIR_INIT, windDir, seedBase;
 
-// ==== PARÁMETROS DE SÍNTESIS (tal cual tu script base) ====
+// Telas siempre más grandes que la pantalla
+const PLANE_SCALE = 2.4; // 1.2–2.0 según preferencia
+function updatePlaneSize(){ PLANE_SIZE = Math.max(windowWidth, windowHeight) * PLANE_SCALE; }
+
+// ==== LUZ GLOBAL ====
+let BRIGHTNESS_GAIN = 1.7;   // escala RGB
+let ALPHA_GAIN      = 1.9;   // escala de opacidad
+let ALPHA_CLAMP_MAX = 160;   // tope alfa
+const WHITE_VEIL    = 80;    // 0..80 (0 = off)
+
+// ==== SALIDA / MASTER ====
+let preGain, postGain, limiter; // cadena: MIX -> preGain -> limiter -> postGain -> master
+let OUT_VOL = 1;            // 0..1 control de volumen
+let LIMITER_DRIVE = 5.4;       // 1..4 empuja al limitador (perceived loudness)
+let LIMITER_ON = true;         // on/off lógico del limitador
+
+function applyOutputGains(){
+  // Ganancia previa al limitador (drive) y salida final
+  preGain.amp(constrain(OUT_VOL * (LIMITER_ON ? LIMITER_DRIVE : 1.0), 0, 4.0));
+  postGain.amp(1.0); // mantenemos unity en la salida
+}
+
+// ==== PARÁMETROS DE SÍNTESIS ====
 const synthParams = {
   oscType: 'triangle',
-  baseNote: 48, // (coment: 48=C3)
-  scaleSteps: [0, 2, 4, 5, 7, 9, 11],       // Do mayor
+  baseNote: 48, // C3
+  scaleSteps: [0, 2, 4, 5, 7, 9, 11],
   crossfadeTime: 1.2,
   minRest: 10.0,
   changeInterval: [6, 15],
   amp: 0.5,
   delayTime: 0.900,
-  delayFeedback: 0.4,
+  delayFeedback: 0.2,
   delayFilter: 3000,
-  reverbTime: 5.98,
-  reverbDecay: 0.8
+  reverbTime: 2.98,
+  reverbDecay: 0.4
 };
 
 // ==== ARMÓNÍA ====
-// Acordes en Do mayor (en semitonos relativos a C): triadas; 'add' para color ocasional
 const CHORDS = [
-  { name:'I',   tones:[0,4,7],     add:[2,9]  }, // C E G (+D/9, A/6)
-  { name:'iii', tones:[4,7,11],    add:[2,9]  }, // Em
-  { name:'vi',  tones:[9,0,4],     add:[2,7]  }, // Am
-  { name:'ii',  tones:[2,5,9],     add:[11,4] }, // Dm
-  { name:'V',   tones:[7,11,2],    add:[9]    }  // G
+  { name:'I',   tones:[0,4,7],     add:[2,9]  },
+  { name:'iii', tones:[4,7,11],    add:[2,9]  },
+  { name:'vi',  tones:[9,0,4],     add:[2,7]  },
+  { name:'ii',  tones:[2,5,9],     add:[11,4] },
+  { name:'V',   tones:[7,11,2],    add:[9]    }
 ];
-// Transiciones no determinísticas (Markov liviano)
 const CHORD_GRAPH = {
   'I'  : [{to:'iii',w:2},{to:'vi',w:3},{to:'ii',w:2},{to:'V',w:3}],
   'iii': [{to:'vi',w:3},{to:'ii',w:2},{to:'V',w:2},{to:'I',w:2}],
@@ -45,39 +65,50 @@ const CHORD_GRAPH = {
   'ii' : [{to:'V',w:4},{to:'I',w:2},{to:'vi',w:2}],
   'V'  : [{to:'I',w:5},{to:'vi',w:2},{to:'iii',w:1},{to:'ii',w:1}]
 };
-let chordIndex = 0;                 // empezamos en I
-const CHORD_CHANGE_PROB = 0.35;     // prob de cambiar de acorde cuando termina un cambio de voz
-const COLOR_PROB = 0.18;            // prob de usar un tono de color del acorde
-
-// 4ª voz: prob de estar dentro del acorde vs fuera (nota diatónica no perteneciente al acorde)
+let chordIndex = 0;
+const CHORD_CHANGE_PROB = 0.35;
+const COLOR_PROB = 0.18;
 const FOURTH_IN_CHORD_PROB = 0.7;
 
-// ==== AUDIO ==== (se inicializa tras un gesto o autostart si el browser lo permite)
+// ==== AUDIO ====
 let audioStarted = false;
 let osc = [], gain = [], delay = [], reverb;
-let activeNotes = [];           // 4 elementos (3 + color)
-let nextChangeTimes = [];       // tiempos independientes por voz
+let activeNotes = [];
+let nextChangeTimes = [];
 let changing = false;
 
 // ==== RANGOS POR VOZ ====
-// Mantengo los tuyos para voces 0..2; la 4ª voz usa un rango solapado central
 const RANGES = [
-  { low: 46, high: 54 },  // voz 0 (grave relativo)
-  { low: 52, high: 60 },  // voz 1 (medio)
-  { low: 58, high: 66 },  // voz 2 (agudo)
-  { low: 62, high: 76 }   // voz 3 (color, solapado central)
+  { low: 46, high: 54 },
+  { low: 52, high: 60 },
+  { low: 58, high: 66 },
+  { low: 62, high: 76 }
 ];
+
+// ==== CÁMARA (FIJA) ====
+let cam;
 
 // ==== SETUP ====
 function setup() {
   createCanvas(windowWidth, windowHeight, WEBGL);
   noStroke();
+  updatePlaneSize(); // telas > pantalla
+
   seedBase = random(10000);
   PLANE_NORMAL = createVector(0, 0, 1);
   WIND_DIR_INIT = createVector(1, 0.15, 0).normalize();
   windDir = WIND_DIR_INIT.copy();
-  tryAutostart(); // intenta arrancar solo si el navegador lo permite
+
+  // Cámara fija (no se mueve nunca)
+  cam = createCamera();
+  cam.setPosition(0, 0, 0); // ajustá Z si querés más/menos zoom
+  cam.lookAt(0, 0, 0);
+
+  tryAutostart();
 }
+
+// NO usamos orbitControl(), así el click/drag nunca mueve la cámara.
+// Igualmente, dejamos los gestos para iniciar audio si hace falta.
 function mousePressed(){ startAudioIfNeeded(); }
 function touchStarted(){ startAudioIfNeeded(); }
 function keyPressed(){ startAudioIfNeeded(); }
@@ -97,8 +128,23 @@ function startAudioIfNeeded(){
 }
 
 function initAudio(){
+  // Buses / cadena master
+  preGain  = new p5.Gain();
+  postGain = new p5.Gain();
+  limiter  = new p5.Compressor();
+
+  // Configuración tipo "brickwall limiter"
+  // threshold bajo, ratio muy alto, ataque corto, release corto, knee duro
+  limiter.threshold(-3);  // dB
+  limiter.ratio(20);      // ~brickwall
+  limiter.attack(0.003);  // s
+  limiter.release(0.12);  // s
+  limiter.knee(0);        // dB
+
+  // Efectos
   reverb = new p5.Reverb();
 
+  // Voces
   for(let i=0;i<4;i++){
     osc[i]   = new p5.Oscillator(synthParams.oscType);
     gain[i]  = new p5.Gain();
@@ -109,7 +155,6 @@ function initAudio(){
     gain[i].connect(delay[i]);
     delay[i].connect(reverb);
 
-    // 4ª voz más suave
     const amp = (i===3) ? synthParams.amp*0.45 : synthParams.amp;
     gain[i].amp(amp);
 
@@ -122,6 +167,15 @@ function initAudio(){
     reverb.process(delay[i], synthParams.reverbTime, synthParams.reverbDecay);
   }
 
+  // Ruta final: REVERB -> preGain -> LIMITER -> postGain -> master
+  reverb.disconnect();
+  reverb.connect(preGain);
+  preGain.connect(limiter);
+  limiter.connect(postGain);
+  postGain.connect(); // a master
+
+  applyOutputGains();
+
   // Notas iniciales
   for(let i=0;i<4;i++){
     let n = pickNoteHarmonic(activeNotes, i);
@@ -129,7 +183,6 @@ function initAudio(){
     osc[i].freq(midiToFreq(n));
     osc[i].start();
 
-    // la 4ª voz cambia un poco más lento
     const jitter = (i===3)? 1.5 : 1.0;
     nextChangeTimes[i] = seconds() + random(synthParams.changeInterval[0], synthParams.changeInterval[1])*jitter;
   }
@@ -137,9 +190,9 @@ function initAudio(){
 
 // ==== DRAW ====
 function draw(){
-  background(8);
+  background(15);
 
-  // Overlay de inicio (compatible WEBGL, sin save/restore)
+  // Overlay de inicio
   if(!audioStarted){
     push();
     resetMatrix();
@@ -150,21 +203,36 @@ function draw(){
     pop();
   }
 
-  orbitControl();
+  // Cámara no se mueve (no orbitControl), la fijamos por si acaso
+  cam.setPosition(0, 0, 1400);
+  cam.lookAt(0, 0, 0);
+
   let t = seconds();
   updateWind(t);
 
-  // VISUAL
+  // Movimiento global sutil de las telas (no de la cámara)
   let globalOffset = createVector(
     sin(t*TRANSLATION_SPEED)*TRANSLATION_RADIUS,
     cos(t*TRANSLATION_SPEED*0.7)*TRANSLATION_RADIUS,
     sin(t*TRANSLATION_SPEED*0.5)*TRANSLATION_RADIUS
   );
+
+  blendMode(ADD);
+
   let colors = [color(255,0,0), color(0,255,0), color(0,0,255)];
   for(let i=0;i<3;i++){
     let offset = (i-1)*DIST_BETWEEN;
     push(); translate(globalOffset.x,globalOffset.y,globalOffset.z);
     drawPlane(PLANE_NORMAL, offset, colors[i], t, i);
+    pop();
+  }
+
+  blendMode(BLEND);
+
+  if (WHITE_VEIL > 0) {
+    push();
+    resetMatrix(); translate(-width/2, -height/2, 0);
+    noStroke(); fill(255, WHITE_VEIL); rect(0,0,width,height);
     pop();
   }
 
@@ -179,18 +247,14 @@ function evolveHarmony(t){
     if(t > nextChangeTimes[i]){
       changing = true;
 
-      // decidir destino armónico: para la 4ª voz no cambiamos el acorde
       if(i!==3 && random()<CHORD_CHANGE_PROB){
         chordIndex = chooseNextChordIndex(chordIndex);
       }
 
-      // calcular nueva nota para la voz i
-      let currentNotes = activeNotes.slice(); // incluye 4ª voz
-      let newNote = (i===3)
-        ? pickNoteColor(currentNotes, i)     // 4ª voz: a veces fuera del acorde
-        : pickNoteHarmonic(currentNotes, i); // voces 0..2 dentro del acorde
+      let currentNotes = activeNotes.slice();
+      let newNote = (i===3) ? pickNoteColor(currentNotes, i)
+                            : pickNoteHarmonic(currentNotes, i);
 
-      // crossfade de frecuencia
       const oldF = osc[i].getFreq();
       const newF = midiToFreq(newNote);
       const startT = seconds();
@@ -202,7 +266,6 @@ function evolveHarmony(t){
           clearInterval(fade);
           activeNotes[i] = newNote;
 
-          // proximo cambio y cooldown global
           const jitter = (i===3)? 1.5 : 1.0;
           nextChangeTimes[i] = seconds()
                               + random(synthParams.changeInterval[0], synthParams.changeInterval[1])*jitter
@@ -211,13 +274,12 @@ function evolveHarmony(t){
         }
       }, 30);
 
-      break; // solo una voz a la vez
+      break;
     }
   }
 }
 
 // ==== ELECCIÓN DE NOTAS ====
-// Voces 0..2: siempre nota del acorde activo (con opción de color)
 function pickNoteHarmonic(exclude, voiceIndex){
   const R = RANGES[voiceIndex];
   const chord = CHORDS[chordIndex];
@@ -225,7 +287,6 @@ function pickNoteHarmonic(exclude, voiceIndex){
   if(random() < COLOR_PROB && chord.add && chord.add.length){
     toneSet = toneSet.concat( random(chord.add) );
   }
-  // candidatos por octavas dentro del rango de la voz
   const candidates = [];
   for(const semi of toneSet){
     const base = R.low - (R.low % 12);
@@ -236,9 +297,8 @@ function pickNoteHarmonic(exclude, voiceIndex){
   }
   if(candidates.length===0) return fallbackInRange(R);
 
-  // voice-leading: nota más cercana a la actual
   const current = activeNotes[voiceIndex] ?? (R.low+R.high>>1);
-  candidates.sort((a,b)=>abs(a-current)-abs(b-current));
+  candidates.sort((a,b)=>Math.abs(a-current)-Math.abs(b-current));
 
   for(const note of candidates){
     if(exclude.includes(note)) continue;
@@ -247,20 +307,16 @@ function pickNoteHarmonic(exclude, voiceIndex){
   return candidates[0];
 }
 
-// Voz 3 (color): 70% del acorde, 30% fuera del acorde (pero diatónica)
 function pickNoteColor(exclude, voiceIndex){
   const R = RANGES[voiceIndex];
   const chord = CHORDS[chordIndex];
-
-  // set diatónico (escala mayor)
   const scaleSet = synthParams.scaleSteps.slice();
 
-  // si va fuera del acorde, excluir tonos del acorde
   let allowedSemis;
   if(random() < FOURTH_IN_CHORD_PROB){
-    allowedSemis = chord.tones.slice();              // dentro
+    allowedSemis = chord.tones.slice();
   }else{
-    allowedSemis = scaleSet.filter(s=>!chord.tones.includes(s)); // fuera del acorde
+    allowedSemis = scaleSet.filter(s=>!chord.tones.includes(s));
     if(allowedSemis.length===0) allowedSemis = scaleSet;
   }
 
@@ -275,7 +331,7 @@ function pickNoteColor(exclude, voiceIndex){
   if(candidates.length===0) return fallbackInRange(R);
 
   const current = activeNotes[voiceIndex] ?? (R.low+R.high>>1);
-  candidates.sort((a,b)=>abs(a-current)-abs(b-current));
+  candidates.sort((a,b)=>Math.abs(a-current)-Math.abs(b-current));
 
   for(const note of candidates){
     if(exclude.includes(note)) continue;
@@ -284,35 +340,31 @@ function pickNoteColor(exclude, voiceIndex){
   return candidates[0];
 }
 
-// util: evitar segundas (1 o 2 semitonos mod 12)
 function clashesSecond(note, arr){
   return arr.some(e=>{
-    let d = abs((note - e) % 12);
+    let d = Math.abs((note - e) % 12);
     if(d>6) d = 12 - d;
     return d===1 || d===2;
   });
 }
 function fallbackInRange(R){
-  // nota de escala más cercana al centro del rango
   const mid = (R.low+R.high)>>1;
   const semi = mid%12;
   let best = synthParams.scaleSteps[0], bestD=99;
   for(const s of synthParams.scaleSteps){
-    const d = abs(s-semi); if(d<bestD){ bestD=d; best=s; }
+    const d = Math.abs(s-semi); if(d<bestD){ bestD=d; best=s; }
   }
   return mid - (mid%12) + best;
 }
 
-// ==== TRANSICIÓN DE ACORDES (no secuencial) ====
+// ==== TRANSICIÓN DE ACORDES ====
 function chooseNextChordIndex(currentIndex){
   const current = CHORDS[currentIndex].name;
   const edges = CHORD_GRAPH[current] || [];
   if(edges.length===0){
-    // fallback: cualquiera menos el mismo
     let idx; do { idx = int(random(CHORDS.length)); } while(idx===currentIndex);
     return idx;
   }
-  // weighted choice
   let sum = edges.reduce((a,e)=>a+e.w,0);
   let r = random(sum), acc=0;
   for(const e of edges){
@@ -352,7 +404,13 @@ function drawPlane(normal,offset,col,t,layerId){
   let basis=basisFromNormal(normal);
   let S=PLANE_SIZE/2, du=(2*S)/GRID_STEPS, dv=(2*S)/GRID_STEPS;
   let origin=p5.Vector.mult(normal,offset);
-  noStroke(); let r=red(col),g=green(col),b=blue(col);
+  noStroke();
+
+  // RGB con ganancia de brillo
+  let r = Math.min(255, red(col)   * BRIGHTNESS_GAIN);
+  let g = Math.min(255, green(col) * BRIGHTNESS_GAIN);
+  let b = Math.min(255, blue(col)  * BRIGHTNESS_GAIN);
+
   beginShape(TRIANGLES);
   for(let iy=-GRID_STEPS/2; iy<GRID_STEPS/2; iy++){
     for(let ix=-GRID_STEPS/2; ix<GRID_STEPS/2; ix++){
@@ -360,11 +418,20 @@ function drawPlane(normal,offset,col,t,layerId){
       let p1=planePoint(origin,basis,(ix+1)*du,iy*dv);
       let p2=planePoint(origin,basis,ix*du,(iy+1)*dv);
       let p3=planePoint(origin,basis,(ix+1)*du,(iy+1)*dv);
+
       let a0=alphaAt(p0,t,layerId), a1=alphaAt(p1,t,layerId),
           a2=alphaAt(p2,t,layerId), a3=alphaAt(p3,t,layerId);
+
+      // Alfa con ganancia y tope
+      a0 = constrain(a0 * ALPHA_GAIN, 0, ALPHA_CLAMP_MAX);
+      a1 = constrain(a1 * ALPHA_GAIN, 0, ALPHA_CLAMP_MAX);
+      a2 = constrain(a2 * ALPHA_GAIN, 0, ALPHA_CLAMP_MAX);
+      a3 = constrain(a3 * ALPHA_GAIN, 0, ALPHA_CLAMP_MAX);
+
       fill(r,g,b,a0); vertex(p0.x,p0.y,p0.z);
       fill(r,g,b,a1); vertex(p1.x,p1.y,p1.z);
       fill(r,g,b,a2); vertex(p2.x,p2.y,p2.z);
+
       fill(r,g,b,a1); vertex(p1.x,p1.y,p1.z);
       fill(r,g,b,a3); vertex(p3.x,p3.y,p3.z);
       fill(r,g,b,a2); vertex(p2.x,p2.y,p2.z);
@@ -378,7 +445,7 @@ function planePoint(origin,b,u,v){
   return p5.Vector.add(p5.Vector.add(origin,p5.Vector.mult(b.U,u)),p5.Vector.mult(b.V,v));
 }
 function basisFromNormal(n){
-  let helper = abs(n.z)<0.9 ? createVector(0,0,1) : createVector(0,1,0);
+  let helper = Math.abs(n.z)<0.9 ? createVector(0,0,1) : createVector(0,1,0);
   let U=n.copy().cross(helper).normalize();
   let V=n.copy().cross(U).normalize();
   return {U,V,N:n.copy()};
@@ -394,4 +461,7 @@ function updateWind(t){
   if(tang.mag()<1e-3) tang=anyPerp(PLANE_NORMAL, createVector(1,0,0));
   windDir=tang.normalize();
 }
-function windowResized(){ resizeCanvas(windowWidth, windowHeight); }
+function windowResized(){
+  resizeCanvas(windowWidth, windowHeight);
+  updatePlaneSize(); // mantener telas > pantalla
+}
