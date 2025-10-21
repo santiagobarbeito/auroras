@@ -40,18 +40,18 @@ const synthParams = {
   baseNote: 48, // C3
   scaleSteps: [0, 2, 4, 5, 7, 9, 11],
   crossfadeTime: 1.2,
-  minRest: 10.0,
+  minRest: 7.0,
   changeInterval: [6, 15],
   amp: 1,
   delayTime: 0.900,
-  delayFeedback: 0.25,
+  delayFeedback: 0.20,
   delayFilter: 4000,
   reverbTime: 2.98,
   reverbDecay: 0.4
 };
 
 // ==== ARMÓNÍA ====
-const CHORDS = [
+const CHORDS = [    
   { name:'I',   tones:[0,4,7],     add:[2,9]  },
   { name:'iii', tones:[4,7,11],    add:[2,9]  },
   { name:'vi',  tones:[9,0,4],     add:[2,7]  },
