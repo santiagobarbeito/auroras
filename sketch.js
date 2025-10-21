@@ -44,10 +44,10 @@ const synthParams = {
   changeInterval: [6, 15],
   amp: 1,
   delayTime: 0.900,
-  delayFeedback: 0.20,
+  delayFeedback: 0.1,
   delayFilter: 4000,
-  reverbTime: 2.98,
-  reverbDecay: 0.4
+  reverbTime: 1.98,
+  reverbDecay: 0.1
 };
 
 // ==== ARMÓNÍA ====
